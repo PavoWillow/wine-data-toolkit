@@ -1,0 +1,35 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Virtual environments
+venv/
+env/
+.env/
+
+# IDE files
+.idea/
+.vscode/
+
+# Local data files
+*.csv
+*.json
+!example_data/*.json
+!example_data/*.csv
+vivino_wine_data/
+
+# Logs
+*.log
+
+# Secrets
+.env
+*checkpoint*.json
+
+# Mac files
+.DS_Store
