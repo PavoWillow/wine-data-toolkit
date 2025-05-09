@@ -1,4 +1,11 @@
 requests>=2.25.0
 json5>=0.9.5
 tqdm>=4.50.0
-algoliasearch>=2.6.0
+algoliasearch>=2.6.0# Sommelier AI Assistant dependencies
+flask==2.3.3
+flask-cors==4.0.0
+python-dotenv==1.0.0
+matplotlib==3.7.2
+numpy==1.25.2
+algoliasearch==3.0.0
+colorama==0.4.6
