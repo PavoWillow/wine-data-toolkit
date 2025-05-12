@@ -1,9 +1,9 @@
 // src/App.jsx - Updated to include API Test
+import React from 'react'
 import { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom';
 import sommelierService from './services/api';
 import Dashboard from './pages/Dashboard';
-import ApiTest from './components/ApiTest';
 import './App.css';
 
 function App() {
@@ -101,7 +101,6 @@ function App() {
             <div className="loading">Loading...</div>
           ) : (
             <>
-              {apiStatus === 'failed' && <ApiTest />}
               
               <Routes>
                 <Route 

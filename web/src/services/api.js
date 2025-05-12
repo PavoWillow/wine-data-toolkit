@@ -1,8 +1,7 @@
 // src/services/api.js
 import axios from 'axios';
 
-// Updated API URL - note we're now directly accessing the Flask routes
-// without the /api prefix if your routes don't include it
+// API URL for the Flask backend
 const API_URL = 'http://localhost:5001';
 
 // Create axios instance
@@ -12,6 +11,11 @@ const api = axios.create({
     'Content-Type': 'application/json',
   },
 });
+
+// Try to get persisted conversation ID from localStorage
+const getPersistedConversationID = () => {
+  return localStorage.getItem('sommelierConversationID');
+};
 
 // API service functions
 const sommelierService = {
@@ -28,14 +32,44 @@ const sommelierService = {
   },
   
   // Send a query to the sommelier assistant
-  sendQuery: async (query, promptType = null) => {
+  sendQuery: async (query, promptType = null, conversationID = null) => {
     try {
-      console.log(`Sending query to API: ${query} (promptType: ${promptType || 'auto'})`);
-      const response = await api.post('/api/query', { 
+      // If no conversationID provided but we have one in localStorage, use that
+      if (!conversationID) {
+        const storedID = getPersistedConversationID();
+        if (storedID) {
+          console.log(`API Service: Recovered conversation ID from storage: ${storedID}`);
+          conversationID = storedID;
+        }
+      }
+      
+      console.log(`API Service: Sending query with conversationID: ${conversationID || 'new'}`);
+      
+      // Build the request object
+      const requestData = { 
         query, 
-        promptType 
-      });
-      console.log('Query response:', response.data);
+        promptType,
+        conversationID  // Always include conversationID (null is fine if not set)
+      };
+      
+      console.log('API Service: Full request data:', JSON.stringify(requestData));
+      
+      const response = await api.post('/api/query', requestData);
+      
+      // Log the full response for debugging
+      console.log('API Service: Response received:', JSON.stringify(response.data, null, 2));
+      
+      // Always check for and handle conversationID in the response
+      if (response.data && response.data.conversationID) {
+        const newConversationID = response.data.conversationID;
+        console.log(`API Service: Received conversationID: ${newConversationID}`);
+        
+        // Store conversation ID in localStorage for persistence
+        localStorage.setItem('sommelierConversationID', newConversationID);
+      } else {
+        console.warn('API Service: No conversationID in response!');
+      }
+      
       return response.data;
     } catch (error) {
       console.error('Error sending query:', error);
@@ -69,7 +103,13 @@ const sommelierService = {
   // Clear conversation history
   clearConversation: async () => {
     try {
+      console.log('API Service: Clearing conversation history');
       const response = await api.post('/api/clear-conversation');
+      
+      // Also clear the conversation ID from localStorage
+      localStorage.removeItem('sommelierConversationID');
+      console.log('API Service: Cleared conversationID from storage');
+      
       return response.data;
     } catch (error) {
       console.error('Error clearing conversation:', error);

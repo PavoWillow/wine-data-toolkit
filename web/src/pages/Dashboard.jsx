@@ -1,127 +1,165 @@
-// src/pages/Dashboard.jsx - Updated with automatic metrics refresh
+// src/pages/Dashboard.jsx
 import { useState, useEffect, useRef } from 'react';
-import sommelierService from '../services/api';
 import ChatPanel from '../components/ChatPanel';
 import MetricsPanel from '../components/MetricsPanel';
+import sommelierService from '../services/api';
 
-function Dashboard({ metrics: initialMetrics, promptTypes }) {
+function Dashboard({ metrics, promptTypes }) {
   const [conversations, setConversations] = useState([]);
-  const [isProcessing, setIsProcessing] = useState(false);
   const [selectedPromptType, setSelectedPromptType] = useState(null);
-  const [currentMetrics, setCurrentMetrics] = useState(initialMetrics);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [currentMetrics, setCurrentMetrics] = useState(metrics);
+  const [conversationID, setConversationID] = useState(null); // Track conversation ID
   
-  // Set up automatic metrics refresh
+  // Use a ref to track if we're in a conversation
+  const isInConversation = useRef(false);
+  
+  // Debug conversation state
   useEffect(() => {
-    // Function to fetch latest metrics
+    if (conversationID) {
+      console.log(`Active conversation ID: ${conversationID}`);
+      isInConversation.current = true;
+      // Store in localStorage for persistence
+      localStorage.setItem('sommelierConversationID', conversationID);
+    }
+  }, [conversationID]);
+
+  // Add initialization to recover conversation ID
+  useEffect(() => {
+    const savedID = localStorage.getItem('sommelierConversationID');
+    if (savedID) {
+      setConversationID(savedID);
+      isInConversation.current = true;
+      console.log(`Recovered conversation ID: ${savedID}`);
+    }
+  }, []);
+  
+  // Update metrics periodically
+  useEffect(() => {
     const fetchMetrics = async () => {
       try {
-        const updatedMetrics = await sommelierService.getMetrics();
-        setCurrentMetrics(updatedMetrics);
+        const metricsData = await sommelierService.getMetrics();
+        setCurrentMetrics(metricsData);
       } catch (error) {
-        console.error("Error refreshing metrics:", error);
+        console.error("Error fetching metrics:", error);
       }
     };
     
-    // Set up interval for periodic refresh (every 3 seconds)
-    const refreshInterval = setInterval(fetchMetrics, 3000);
+    // Initial update
+    fetchMetrics();
     
-    // Clean up on component unmount
-    return () => clearInterval(refreshInterval);
+    // Set up interval for updates
+    const intervalId = setInterval(fetchMetrics, 3000);
+    
+    // Clean up interval on component unmount
+    return () => clearInterval(intervalId);
   }, []);
   
-  // Refresh metrics after a new query is processed
-  const refreshMetricsAfterQuery = async () => {
-    try {
-      const updatedMetrics = await sommelierService.getMetrics();
-      setCurrentMetrics(updatedMetrics);
-    } catch (error) {
-      console.error("Error refreshing metrics after query:", error);
-    }
-  };
-  
+  // Handle sending a query to the sommelier assistant
   const handleSendQuery = async (query) => {
-    if (!query.trim() || isProcessing) return;
-    
-    // Add user message to conversation
-    setConversations(prev => [...prev, { 
-      role: 'user', 
-      content: query,
-      timestamp: new Date().toISOString()
-    }]);
-    
-    setIsProcessing(true);
-    
     try {
-      // Show typing indicator
+      setIsProcessing(true);
+      
+      // Add user message to the conversation
+      setConversations(prev => [...prev, { role: 'user', content: query }]);
+      
+      // Add "thinking" message
       setConversations(prev => [...prev, { 
         role: 'assistant', 
-        content: '...',
-        isTyping: true,
-        timestamp: new Date().toISOString()
+        isTyping: true, 
+        content: 'Thinking...' 
       }]);
+
+      console.log(`Sending query with conversation ID: ${conversationID || 'NEW'}`);
       
-      // Send query to API
-      const response = await sommelierService.sendQuery(query, selectedPromptType);
+      // Send query to API with current conversation ID if available
+      const response = await sommelierService.sendQuery(
+        query, 
+        selectedPromptType,
+        conversationID  // Pass conversation ID to maintain context
+      );
       
-      // Remove typing indicator and add actual response
-      setConversations(prev => {
-        const filtered = prev.filter(msg => !msg.isTyping);
-        return [...filtered, { 
+      // Update conversation ID if returned from API
+      if (response.conversationID) {
+        console.log(`Received conversation ID: ${response.conversationID}`);
+        setConversationID(response.conversationID);
+        isInConversation.current = true;
+      }
+      
+      // Remove "thinking" message and add real response
+      setConversations(prev => [
+        ...prev.slice(0, -1), // Remove the "thinking" message
+        { 
           role: 'assistant', 
           content: response.response,
-          isCacheHit: response.cache_hit,
+          isCacheHit: Boolean(response.cache_hit) || response.response_time < 0.3,
           responseTime: response.response_time,
-          queryType: response.query_type,
-          timestamp: new Date().toISOString()
-        }];
-      });
+          queryType: response.query_type
+        }
+      ]);
       
-      // Refresh metrics after processing the query
-      await refreshMetricsAfterQuery();
-      
+      // Fetch updated metrics after query
+      const metricsData = await sommelierService.getMetrics();
+      setCurrentMetrics(metricsData);
     } catch (error) {
       console.error("Error sending query:", error);
       
-      // Remove typing indicator and add error message
-      setConversations(prev => {
-        const filtered = prev.filter(msg => !msg.isTyping);
-        return [...filtered, { 
+      // Remove "thinking" message and add error message
+      setConversations(prev => [
+        ...prev.slice(0, -1), // Remove the "thinking" message
+        { 
           role: 'assistant', 
-          content: 'Sorry, I encountered an error while processing your request. Please try again.',
-          isError: true,
-          timestamp: new Date().toISOString()
-        }];
-      });
+          content: "I'm sorry, I couldn't generate a response. Please try again."
+        }
+      ]);
     } finally {
       setIsProcessing(false);
     }
   };
   
-  const clearConversation = async () => {
+  // Handle clearing the conversation
+  const handleClearConversation = async () => {
     try {
+      // Call the API to clear conversation state
       await sommelierService.clearConversation();
+      
+      // Clear the local state
       setConversations([]);
+      setConversationID(null); // Reset conversation ID
+      isInConversation.current = false;
+      console.log("Conversation cleared - ID reset to null");
+      
+      // Fetch updated metrics
+      const metricsData = await sommelierService.getMetrics();
+      setCurrentMetrics(metricsData);
     } catch (error) {
       console.error("Error clearing conversation:", error);
     }
   };
   
+  // Handle changing the prompt type
+  const handleChangePromptType = (type) => {
+    // Changing prompt type should clear conversation if we're in one
+    if (isInConversation.current) {
+      handleClearConversation();
+    }
+    
+    setSelectedPromptType(type === '' ? null : type);
+  };
+  
   return (
     <div className="dashboard-container">
-      <div className="dashboard-chat">
-        <ChatPanel 
-          conversations={conversations} 
-          onSendQuery={handleSendQuery}
-          onClearConversation={clearConversation}
-          promptTypes={promptTypes}
-          selectedPromptType={selectedPromptType}
-          onChangePromptType={setSelectedPromptType}
-          isProcessing={isProcessing}
-        />
-      </div>
-      <div className="dashboard-metrics">
-        <MetricsPanel metrics={currentMetrics} />
-      </div>
+      <ChatPanel 
+        conversations={conversations}
+        onSendQuery={handleSendQuery}
+        onClearConversation={handleClearConversation}
+        promptTypes={promptTypes}
+        selectedPromptType={selectedPromptType}
+        onChangePromptType={handleChangePromptType}
+        isProcessing={isProcessing}
+        isInConversation={isInConversation.current}
+      />
+      <MetricsPanel metrics={currentMetrics} />
     </div>
   );
 }

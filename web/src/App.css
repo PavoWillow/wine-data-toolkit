@@ -339,3 +339,10 @@
   50% { opacity: 1; }
   100% { opacity: 0.6; }
 }
+
+.conversation-thread-indicator {
+  text-align: center;
+  margin: 0.25rem 0;
+  font-size: 0.75rem;
+  color: var(--gray-500);
+}

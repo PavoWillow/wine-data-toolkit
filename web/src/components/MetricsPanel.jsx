@@ -1,10 +1,10 @@
 // src/components/MetricsPanel.jsx
 import { useEffect, useRef } from 'react';
-import { Chart as ChartJS, ArcElement, Tooltip, Legend } from 'chart.js';
-import { Doughnut } from 'react-chartjs-2';
+import { Chart as ChartJS, ArcElement, BarElement, CategoryScale, LinearScale, Tooltip, Legend } from 'chart.js';
+import { Doughnut, Bar } from 'react-chartjs-2';
 
 // Register Chart.js components
-ChartJS.register(ArcElement, Tooltip, Legend);
+ChartJS.register(ArcElement, BarElement, CategoryScale, LinearScale, Tooltip, Legend);
 
 function MetricsPanel({ metrics }) {
   // Create ref for charts
@@ -53,6 +53,34 @@ function MetricsPanel({ metrics }) {
     cutout: '70%',
     responsive: true,
     maintainAspectRatio: false,
+  };
+
+  // Data for operations chart
+  const operationsData = {
+    labels: ['Search', 'Get', 'Save', 'Update', 'Delete'],
+    datasets: [
+      {
+        data: [
+          metrics.algolia_operations?.search_operations || 0,
+          metrics.algolia_operations?.get_operations || 0,
+          metrics.algolia_operations?.save_operations || 0,
+          metrics.algolia_operations?.update_operations || 0,
+          metrics.algolia_operations?.delete_operations || 0
+        ],
+        backgroundColor: ['#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#e74c3c'],
+      },
+    ],
+  };
+
+  // Options for operations chart
+  const operationsOptions = {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: {
+      legend: {
+        position: 'bottom',
+      },
+    }
   };
   
   // Calculate speedup factor
@@ -127,6 +155,29 @@ function MetricsPanel({ metrics }) {
           </div>
         </div>
         
+        <div className="metrics-section">
+          <h3>⚙️ Algolia Operations</h3>
+          <div className="chart-container">
+            <Bar data={operationsData} options={operationsOptions} />
+          </div>
+          <div className="metrics-row">
+            <span className="metrics-label">Total Operations:</span>
+            <span className="metrics-value">{metrics.algolia_operations?.total_operations || 0}</span>
+          </div>
+          <div className="metrics-row">
+            <span className="metrics-label">Search Operations:</span>
+            <span className="metrics-value">{metrics.algolia_operations?.search_operations || 0}</span>
+          </div>
+          <div className="metrics-row">
+            <span className="metrics-label">Get Operations:</span>
+            <span className="metrics-value">{metrics.algolia_operations?.get_operations || 0}</span>
+          </div>
+          <div className="metrics-row">
+            <span className="metrics-label">Save Operations:</span>
+            <span className="metrics-value">{metrics.algolia_operations?.save_operations || 0}</span>
+          </div>
+        </div>
+
         {metrics.query_type_performance && metrics.query_type_performance.length > 0 && (
           <div className="metrics-section">
             <h3>🔍 Query Types</h3>

@@ -77,6 +77,11 @@ function ChatPanel({
         ) : (
           conversations.map((msg, index) => (
             <div key={index} className={`message ${msg.role}`}>
+              {index > 0 && conversations[index-1].role !== msg.role && (
+                <div className="conversation-thread-indicator">
+                  <span title="Continuing conversation">🔄</span>
+                </div>
+              )}
               <div 
                 className={`message-content ${msg.isTyping ? 'typing' : ''}`}
               >

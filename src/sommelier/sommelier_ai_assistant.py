@@ -59,7 +59,17 @@ class SommelierAssistant:
             "cache_hit_times": [],
             "generation_times": [],
             "query_types": {},
-            "query_log": []
+            "query_log": [],
+            "algolia_operations": {
+                "search_operations": 0,
+                "get_operations": 0, 
+                "browse_operations": 0,
+                "save_operations": 0,
+                "update_operations": 0,
+                "delete_operations": 0,
+                "total_operations": 0,
+                "operations_cost": 0.0  # If you want to track estimated API costs
+            }
         }
         
         # Estimated cost per 1K tokens for LLM generation (adjust as needed)
@@ -87,6 +97,8 @@ class SommelierAssistant:
             print(f"{Fore.YELLOW}Falling back to keyword-based prompt selection{Style.RESET_ALL}")
             self.semantic_matcher = None
     
+    
+
     # Metrics methods
     def load_metrics(self):
         """Load metrics from file if it exists"""
@@ -171,6 +183,118 @@ class SommelierAssistant:
         self.current_session["actual_cost_with_caching"] = round(actual_cost, 4)
         self.current_session["cost_reduction_percentage"] = round((cost_saved / potential_cost * 100) if potential_cost > 0 else 0, 2)
     
+    def _select_prompt(self, query, prompt_type=None):
+        """Select the appropriate prompt based on query content or specified type"""
+        # If a specific prompt type is requested, use it if available
+        if prompt_type and prompt_type in self.prompts:
+            # Store this prompt type as the last used one
+            self.last_used_prompt_type = prompt_type
+            return self.prompts[prompt_type]
+        
+        # For follow-up questions, use context from conversation
+        query_lower = query.lower()
+        follow_up_indicators = [
+            "option", "sounds good", "that wine", "that one", 
+            "this one", "i'll try", "i'll go with", "tell me more about"
+        ]
+        
+        is_follow_up = any(indicator in query_lower for indicator in follow_up_indicators)
+        
+        # If this appears to be a follow-up question and we have conversation history
+        if is_follow_up and hasattr(self, 'conversation_history') and self.conversation_history:
+            # First, check if we have a stored last prompt type from previous queries
+            if hasattr(self, 'last_used_prompt_type') and self.last_used_prompt_type in self.prompts:
+                print(f"{Fore.CYAN}Using previous prompt type for follow-up: {self.last_used_prompt_type}{Style.RESET_ALL}")
+                return self.prompts[self.last_used_prompt_type]
+                
+            # If we don't have a stored type, try to infer from conversation content
+            if len(self.conversation_history) >= 2:
+                # Look at the last assistant response for clues
+                for msg in reversed(self.conversation_history):
+                    if msg["role"] == "assistant":
+                        last_response = msg["content"].lower()
+                        
+                        # Check for indicators of wine recommendations
+                        if any(term in last_response for term in ["recommend", "suggestion", "option"]):
+                            if "recommendations" in self.prompts:
+                                self.last_used_prompt_type = "recommendations"
+                                return self.prompts["recommendations"]
+                        
+                        # Check for food pairing context
+                        if any(term in last_response for term in ["pair", "pairing", "food", "dish", "meal"]):
+                            if "food_pairing" in self.prompts:
+                                self.last_used_prompt_type = "food_pairing"
+                                return self.prompts["food_pairing"]
+                        
+                        break  # Stop after checking the most recent assistant message
+        
+        # If semantic matcher is available, use it for new queries
+        if hasattr(self, 'semantic_matcher') and self.semantic_matcher:
+            prompt_id = self.semantic_matcher.match_prompt(query)
+            if prompt_id in self.prompts:
+                self.last_used_prompt_type = next((k for k, v in self.prompts.items() if v == prompt_id), None)
+                return self.prompts[prompt_id]
+        
+        # Fall back to keyword matching if semantic matching isn't available or fails
+        # Check for recommendation patterns
+        if any(term in query_lower for term in ["recommend", "suggestion", "what wine should", "looking for a", "good wine"]):
+            if "recommendations" in self.prompts:
+                self.last_used_prompt_type = "recommendations"
+                return self.prompts["recommendations"]
+        
+        # Check for food pairing patterns
+        if any(term in query_lower for term in ["pair with", "pairing", "goes with", "match with", "food"]):
+            if "food_pairing" in self.prompts:
+                self.last_used_prompt_type = "food_pairing"
+                return self.prompts["food_pairing"]
+        
+        # [... rest of your existing detection code ...]
+        
+        # Default to general sommelier prompt if available
+        if "sommelier" in self.prompts:
+            self.last_used_prompt_type = "sommelier"
+            return self.prompts["sommelier"]
+            
+        # Fallback to first available prompt
+        first_prompt_key = next(iter(self.prompts.keys())) if self.prompts else None
+        if first_prompt_key:
+            self.last_used_prompt_type = first_prompt_key
+        return next(iter(self.prompts.values())) if self.prompts else None
+    
+    def _track_algolia_operation(self, operation_type, count=1):
+        """Track an Algolia operation in metrics"""
+        if operation_type not in self.current_session["algolia_operations"]:
+            self.current_session["algolia_operations"][operation_type] = 0
+        
+        self.current_session["algolia_operations"][operation_type] += count
+        self.current_session["algolia_operations"]["total_operations"] += count
+        
+        # You can add cost estimation based on Algolia's pricing
+        # For example, if search operations cost $0.0001 each
+        # operation_costs = {"search_operations": 0.0001, "get_operations": 0.0001, ...}
+        # self.current_session["algolia_operations"]["operations_cost"] += operation_costs.get(operation_type, 0) * count
+
+    def search_index(self, index_name, query, params=None):
+        """Wrapper for Algolia search operation"""
+        index = self.client.init_index(index_name)
+        self._track_algolia_operation("search_operations")
+        return index.search(query, params)
+
+    def get_object(self, index_name, object_id):
+        """Wrapper for Algolia get_object operation"""
+        index = self.client.init_index(index_name)
+        self._track_algolia_operation("get_operations")
+        return index.get_object(object_id)
+
+    def save_object(self, index_name, object_data):
+        """Wrapper for Algolia save_object operation"""
+        index = self.client.init_index(index_name)
+        self._track_algolia_operation("save_operations")
+        return index.save_object(object_data)
+
+    # Add similar methods for other operations
+    
+    
     def log_query(self, query, is_cache_hit, response_time, query_type=None, object_id=None):
         """Log a query and update metrics"""
         self.current_session["total_queries"] += 1
@@ -247,6 +371,19 @@ class SommelierAssistant:
         print(f"Total Queries: {self.current_session['total_queries']}")
         print(f"Cache Hits: {self.current_session['cache_hits']} ({self.current_session['cache_hit_rate']}%)")
         print(f"Cache Misses: {self.current_session['cache_misses']} ({self.current_session['cache_miss_rate']}%)")
+
+        # Add Algolia operations section
+        if "algolia_operations" in self.current_session:
+            print(f"\n{Fore.CYAN}Algolia API Operations:{Style.RESET_ALL}")
+            ops = self.current_session["algolia_operations"]
+            print(f"Total Operations: {ops['total_operations']}")
+            print(f"Search Operations: {ops.get('search_operations', 0)}")
+            print(f"Get Operations: {ops.get('get_operations', 0)}")
+            print(f"Save Operations: {ops.get('save_operations', 0)}")
+            print(f"Update Operations: {ops.get('update_operations', 0)}")
+            print(f"Delete Operations: {ops.get('delete_operations', 0)}")
+            if "operations_cost" in ops and ops["operations_cost"] > 0:
+                print(f"Estimated API Cost: ${ops['operations_cost']:.4f}")
         
         if self.current_session["avg_response_time"] > 0:
             print(f"\nAverage Response Time: {self.current_session['avg_response_time']:.2f}s")
@@ -437,7 +574,17 @@ class SommelierAssistant:
             "cache_hit_times": [],
             "generation_times": [],
             "query_types": {},
-            "query_log": []
+            "query_log": [],
+            "algolia_operations": {
+                "search_operations": 0,
+                "get_operations": 0, 
+                "browse_operations": 0,
+                "save_operations": 0,
+                "update_operations": 0,
+                "delete_operations": 0,
+                "total_operations": 0,
+                "operations_cost": 0.0
+            }
         }
         print(f"{Fore.GREEN}Metrics reset for new session{Style.RESET_ALL}")
     
@@ -504,7 +651,21 @@ class SommelierAssistant:
                 if (filters is None and ds_filters is None) or filters == ds_filters:
                     return ds
         return None
-    
+    def _calculate_text_similarity(self, text1, text2):
+        """Calculate similarity between two text strings"""
+        # Convert to sets of words for a simple Jaccard similarity
+        words1 = set(text1.lower().split())
+        words2 = set(text2.lower().split())
+        
+        # Jaccard similarity: intersection / union
+        if not words1 or not words2:
+            return 0.0
+        
+        intersection = len(words1.intersection(words2))
+        union = len(words1.union(words2))
+        
+        return intersection / union
+
     def _setup_prompts(self):
         """Set up prompts for different sommelier functions"""
         print(f"{Fore.CYAN}Setting up sommelier prompts...{Style.RESET_ALL}")
@@ -800,7 +961,7 @@ class SommelierAssistant:
             if prompt.get("name") == name:
                 return prompt
         return None
-    
+
     def create_data_source(self, name, source_index, filters=None):
         """Create a data source using an existing Algolia index"""
         # First check if a data source with this name and filters already exists
@@ -881,11 +1042,9 @@ class SommelierAssistant:
     def list_data_sources(self):
         """List all data sources"""
         try:
-            index = self.client.init_index("algolia_rag_data_sources")
             data_sources = []
-            
             # Use search with an empty query instead of browse_objects
-            results = index.search('', {
+            results = self.search_index("algolia_rag_data_sources", '', {
                 'hitsPerPage': 1000  # Get up to 1000 data sources
             })
             
@@ -900,11 +1059,9 @@ class SommelierAssistant:
     def list_prompts(self):
         """List all prompts"""
         try:
-            index = self.client.init_index("algolia_rag_prompts")
             prompts = []
-            
             # Use search with an empty query instead of browse_objects
-            results = index.search('', {
+            results = self.search_index("algolia_rag_prompts", '', {
                 'hitsPerPage': 1000  # Get up to 1000 prompts
             })
             
@@ -918,98 +1075,175 @@ class SommelierAssistant:
     
     def find_previous_response(self, query, data_source_id, prompt_id):
         """
-        Find a previously saved response matching the query parameters
+        Enhanced method to find a previously saved response by using flexible text matching
+        to overcome prompt ID mismatches and other inconsistencies.
         
         Args:
             query: The user's query
             data_source_id: The data source ID used for the query
             prompt_id: The prompt ID used for the query
-            
+                    
         Returns:
             The previous response object if found, None otherwise
         """
         try:
-            index = self.client.init_index("algolia_rag_responses")
+            # Normalize the query for better matching
+            normalized_query = query.lower().strip()
+            user_query_only = normalized_query
             
-            # Generate stable object ID for direct lookup
+            # Remove context/conversation markers if present
+            if "user:" in normalized_query:
+                parts = normalized_query.split("user:")
+                user_query_only = parts[-1].strip()
+            
+            if self.debug:
+                print(f"{Fore.CYAN}Looking for response to query: '{user_query_only}'{Style.RESET_ALL}")
+                print(f"{Fore.CYAN}Using data source: {data_source_id}{Style.RESET_ALL}")
+            
+            # First try the direct object ID lookup for backward compatibility
             query_essence = self._get_query_essence(query)
             object_id = self._generate_stable_id(query_essence, data_source_id, prompt_id)
             
             if self.debug:
-                print(f"{Fore.CYAN}Looking for response with objectID: {object_id}{Style.RESET_ALL}")
+                print(f"{Fore.CYAN}Trying direct lookup with objectID: {object_id}{Style.RESET_ALL}")
             
-            # First try direct objectID lookup (fastest)
             try:
-                direct_result = index.get_object(object_id)
+                direct_result = self.get_object("algolia_rag_responses", object_id)
                 print(f"{Fore.GREEN}Found direct cache hit with objectID: {object_id}{Style.RESET_ALL}")
                 return direct_result
             except Exception as e:
                 if self.debug:
                     print(f"{Fore.YELLOW}No direct object match: {e}{Style.RESET_ALL}")
             
-            # Normalize the query for better matching
-            normalized_query = query.lower().strip()
+            # MAIN IMPROVEMENT: Use text-based search focusing on the query content
+            # rather than exact object ID or prompt ID matching
+            print(f"{Fore.CYAN}Searching for similar queries in response index...{Style.RESET_ALL}")
             
-            # Special handling for food pairing queries
-            if "pair" in normalized_query or "pairing" in normalized_query or "goes with" in normalized_query or "good with" in normalized_query:
-                # For food pairing, extract the food items which are the most important part
-                # Common pattern: "wine...pair...with [food]" or "pair [food] with wine"
-                food_keywords = self._extract_food_items(normalized_query)
-                if food_keywords:
-                    search_query = " ".join(food_keywords)
-                    print(f"{Fore.CYAN}Food pairing query detected, searching with food terms: {search_query}{Style.RESET_ALL}")
-                else:
-                    # Fall back to general key term extraction if no food found
-                    search_query = self._extract_key_terms(normalized_query)
-            else:
-                # For other queries, extract key terms normally
-                search_query = self._extract_key_terms(normalized_query)
-                
-            # Debug info
-            if self.debug:
-                print(f"{Fore.CYAN}Looking for cached response with query: {search_query}{Style.RESET_ALL}")
-                print(f"{Fore.CYAN}Data source: {data_source_id}, Prompt: {prompt_id}{Style.RESET_ALL}")
-            
-            # Search for semantic matches (not exact query match)
-            results = index.search(search_query, {
-                'hitsPerPage': 5,
-                'filters': f"dataSourceID:{data_source_id} AND promptID:{prompt_id}"
+            # Search by the actual query text with data source filter only
+            results = self.search_index("algolia_rag_responses", user_query_only, {
+                'hitsPerPage': 10,
+                'filters': f"dataSourceID:{data_source_id}",  # Only filter by data source, not prompt
+                'typoTolerance': True,  # Allow for typos/fuzzy matching
+                'attributesToRetrieve': ['query', 'response', 'conversationID', 'promptID', 'objectID', 'createdAt']
             })
             
             if self.debug:
                 print(f"{Fore.CYAN}Search returned {len(results.get('hits', []))} results{Style.RESET_ALL}")
             
+            # If we found results, look for the best match
             if results.get('hits') and len(results.get('hits')) > 0:
-                # Sort by recency (newest first) manually since we can't use customRanking in the search
-                hits = sorted(results.get('hits'), 
-                              key=lambda x: x.get('createdAt', ''), 
-                              reverse=True)
+                # Find the best matching query
+                best_match = None
+                best_score = 0.7  # Minimum threshold for similarity
                 
-                # Return the most recent match
-                print(f"{Fore.CYAN}Found matching previous response from {hits[0].get('createdAt')}{Style.RESET_ALL}")
-                return hits[0]
+                for hit in results.get('hits'):
+                    hit_query = hit.get('query', '').lower().strip()
+                    
+                    # Extract the user part from context if present
+                    if "user:" in hit_query:
+                        parts = hit_query.split("user:")
+                        hit_user_query = parts[-1].strip()
+                    else:
+                        hit_user_query = hit_query
+                    
+                    # Calculate similarity score
+                    similarity = self._calculate_text_similarity(user_query_only, hit_user_query)
+                    
+                    if self.debug:
+                        print(f"{Fore.CYAN}Comparing '{user_query_only}' with '{hit_user_query}', similarity: {similarity:.2f}{Style.RESET_ALL}")
+                    
+                    # If the similarity exceeds our threshold and is better than previous matches
+                    if similarity > best_score:
+                        best_score = similarity
+                        best_match = hit
                 
-            print(f"{Fore.CYAN}No cached response found{Style.RESET_ALL}")
+                if best_match:
+                    print(f"{Fore.GREEN}Found cached response with {best_score:.2f} similarity{Style.RESET_ALL}")
+                    return best_match
+                    
+            # If no good match is found, try more specialized searches
+            
+            # Special handling for food pairing queries
+            if self._is_food_pairing_query(normalized_query):
+                food_keywords = self._extract_food_items(normalized_query)
+                if food_keywords:
+                    search_query = " ".join(food_keywords)
+                    print(f"{Fore.CYAN}Food pairing query detected, trying food terms: {search_query}{Style.RESET_ALL}")
+                    
+                    # Search specifically with food terms
+                    food_results = self.search_index("algolia_rag_responses", search_query, {
+                        'hitsPerPage': 5,
+                        'filters': f"dataSourceID:{data_source_id}",
+                        'typoTolerance': True
+                    })
+                    
+                    if food_results.get('hits') and len(food_results.get('hits')) > 0:
+                        # Return the best match (newest one)
+                        best_food_match = sorted(food_results.get('hits'), 
+                                            key=lambda x: x.get('createdAt', ''), 
+                                            reverse=True)[0]
+                        print(f"{Fore.GREEN}Found food pairing match from {best_food_match.get('createdAt')}{Style.RESET_ALL}")
+                        return best_food_match
+            
+            print(f"{Fore.YELLOW}No suitable cached response found{Style.RESET_ALL}")
             return None
+            
         except Exception as e:
-            print(f"Error searching for previous responses: {e}")
+            print(f"{Fore.RED}Error searching for previous responses: {e}{Style.RESET_ALL}")
+            if self.debug:
+                import traceback
+                traceback.print_exc()
             return None
     
     def _extract_food_items(self, query):
-        """Extract food items from a pairing query"""
-        # Major food categories to look for
+        """Extract food items from a pairing query with expanded categories and improved validation"""
+        # Clean the query first - remove any conversation artifacts
+        # Add better validation for follow-up queries
+        if "option" in query.lower() or "sounds good" in query.lower() or any(word in query.lower() for word in ["that wine", "that option"]):
+            # Don't attempt to extract food items from follow-up queries
+            return []
+        query = query.lower().strip()
+
+        # Check for follow-up indicators that reference previous suggestions
+        if any(phrase in query for phrase in ["first suggestion", "second suggestion", "third suggestion", 
+                                         "that suggestion", "option", "sounds good"]):
+            if self.debug:
+                print(f"{Fore.CYAN}Detected a follow-up about previous suggestions{Style.RESET_ALL}")
+            return []  # Don't attempt to extract food items
+        
+        # Reject any suspicious tokens that might be from conversation context
+        suspicious_tokens = ["assistant:", "user:", "assistant", "user", "sommelier:"]
+        for token in suspicious_tokens:
+            if token in query:
+                query = query.replace(token, "")
+        
+        # Major food categories to look for (expanded)
         food_categories = [
+            # Meats
             "steak", "beef", "pork", "lamb", "veal", "chicken", "turkey", "duck", "goose", 
+            "meat", "burgers", "barbecue", "bbq", "ribs", "bacon", "ham", "sausage",
+            # Seafood
             "fish", "salmon", "tuna", "cod", "halibut", "trout", "seafood", "shrimp", "lobster", 
-            "crab", "oyster", "mussel", "clam", "scallop", "pasta", "pizza", "risotto", "cheese",
-            "chocolate", "dessert", "cake", "pie"
+            "crab", "oyster", "mussel", "clam", "scallop", "squid", "octopus", "eel",
+            # Italian
+            "pasta", "pizza", "risotto", "lasagna", "spaghetti", "gnocchi", "ravioli",
+            # Cheese and dairy
+            "cheese", "cheddar", "brie", "camembert", "gouda", "blue cheese", "goat cheese", 
+            "parmesan", "feta", "mozzarella", "ricotta", "dairy",
+            # Desserts
+            "chocolate", "dessert", "cake", "pie", "tart", "cookie", "pudding", "ice cream",
+            # Vegetables
+            "vegetable", "salad", "greens", "tomato", "mushroom", "truffle", "potato", 
+            "eggplant", "zucchini", "cucumber", "carrot", "asparagus", "broccoli",
+            # Cuisines
+            "italian", "french", "indian", "chinese", "japanese", "mexican", "thai", "spanish"
         ]
         
         # Check for explicit food mentions
         found_foods = []
         
         for food in food_categories:
-            if food in query:
+            if food in query:  # Use lowercase comparison for better matching
                 found_foods.append(food)
         
         # If none found, look for food terms after "with" in pairing questions
@@ -1020,53 +1254,92 @@ class SommelierAssistant:
                 after_with = parts[1].strip()
                 # Take the first few words after "with" as probable food
                 food_part = " ".join(after_with.split()[:3])
-                found_foods.append(food_part)
+                # Validate the food part - only include if it doesn't have suspicious tokens
+                if not any(token in food_part for token in suspicious_tokens):
+                    found_foods.append(food_part)
         
-        return found_foods
+        # Special handling for follow-up questions about "that" or "this"
+        if not found_foods and ("that" in query or "this" in query) and ("pair" in query or "dish" in query or "food" in query):
+            # For follow-up questions like "what dishes pair well with that?"
+            # Avoid extracting just "that" or "this" as they cause filter issues
+            return []  # Return empty list to avoid problematic filters
+        
+        # Final validation - remove any items that are empty, have punctuation, or are just pronouns
+        cleaned_foods = []
+        pronouns = ["that", "this", "these", "those", "it"]
+        for food in found_foods:
+            # Remove any punctuation at the end
+            food = food.rstrip('.,?!:;')
+            # Skip single pronouns or empty strings
+            if not food.strip() or food.strip() in pronouns:
+                continue
+            cleaned_foods.append(food)
+        
+        return cleaned_foods
     
     def _extract_key_terms(self, query):
-        """Extract the most important terms from a query"""
+        """Extract the most important terms from a query with improved precision"""
         # Break into words
         words = query.split()
         
-        # Stopwords to remove
+        # Expanded stopwords list
         stopwords = {
             "what", "which", "how", "is", "are", "the", "a", "an", "in", "with", "for", "to", 
             "of", "would", "should", "could", "will", "can", "do", "does", "has", "have", "had",
             "i", "you", "he", "she", "we", "they", "it", "this", "that", "these", "those",
-            "am", "is", "are", "was", "were", "be", "been", "being", "there", "their", "me"
+            "am", "is", "are", "was", "were", "be", "been", "being", "there", "their", "me",
+            "and", "or", "but", "if", "then", "so", "because", "since", "while", "when", "where",
+            "why", "how", "all", "any", "both", "each", "few", "more", "most", "other", "some",
+            "such", "no", "nor", "not", "only", "own", "same", "than", "too", "very", "just",
+            "should", "now", "also", "very", "really", "quite"
         }
         
-        # Wine-specific stopwords (common in wine queries but don't distinguish meaning)
-        wine_stopwords = {"wine", "wines", "drink", "bottle", "glass", "recommend", "suggestion"}
+        # Domain-specific stopwords (common in wine queries but don't distinguish meaning)
+        wine_stopwords = {
+            "wine", "wines", "drink", "bottle", "glass", "recommend", "suggestion", 
+            "taste", "flavor", "recommend", "tell", "about", "know", "like", "good"
+        }
         
-        # Weight words that appear later in the query more heavily (often the subject)
+        # Wine domain specific important terms (boosted in weighting)
+        important_terms = {
+            "cabernet", "merlot", "chardonnay", "pinot", "sauvignon", "riesling", "shiraz",
+            "zinfandel", "syrah", "malbec", "champagne", "prosecco", "bordeaux", "burgundy",
+            "vintage", "terroir", "tannin", "acidity", "oak", "body", "dry", "sweet", "pairing",
+            "decant", "cellar", "sommelier", "vineyard", "winery", "german", "french", "italian", "spanish"
+        }
+        
+        # Weight words more intelligently
         weighted_words = []
         for i, word in enumerate(words):
+            word_lower = word.lower()
             # Skip stopwords
-            if word.lower() in stopwords:
+            if word_lower in stopwords:
                 continue
                 
             # Skip short words
-            if len(word) <= 2:
+            if len(word_lower) <= 2:
                 continue
                 
-            # Wine-specific terms get lower weight unless they're the only terms
-            if word.lower() in wine_stopwords and len(words) > 3:
+            # Base weight calculation
+            weight = 1.0
+            
+            # Domain-specific adjustments
+            if word_lower in wine_stopwords and len(words) > 3:
                 weight = 0.5
-            else:
-                # Words later in the sentence often contain the important subject
-                # (especially in questions like "what wine goes with steak?")
-                position_factor = (i + 1) / len(words)  # 0.0 to 1.0
-                weight = 1.0 + position_factor
+            elif word_lower in important_terms:
+                weight = 2.0  # Boost important wine terms
                 
-            weighted_words.append((word.lower(), weight))
+            # Words later in the sentence often contain the important subject
+            position_factor = (i + 1) / len(words)  # 0.0 to 1.0
+            weight += position_factor
+                
+            weighted_words.append((word_lower, weight))
         
         # Sort by weight descending
         weighted_words.sort(key=lambda x: x[1], reverse=True)
         
-        # Take top words (up to 3)
-        top_words = [word for word, _ in weighted_words[:3]]
+        # Take top words (up to 5)
+        top_words = [word for word, _ in weighted_words[:5]]
         
         # If we have no words, use the full query
         if not top_words:
@@ -1074,71 +1347,131 @@ class SommelierAssistant:
             
         # Join top words
         key_terms = " ".join(top_words)
-        print(f"{Fore.CYAN}Extracted key terms: {key_terms}{Style.RESET_ALL}")
+        
+        if self.debug:
+            print(f"{Fore.CYAN}Extracted key terms: {key_terms} (from '{query}'){Style.RESET_ALL}")
+        
         return key_terms
     
-    def process_query(self, query, prompt_type=None, stream=False, callback=None):
+    def process_query(self, query, prompt_type=None, stream=False, callback=None, conversation_id=None):
         """
-        Process a user query and generate a sommelier response
-        
-        Args:
-            query: The user's query text
-            prompt_type: Specific prompt type to use, or None for automatic selection
-            stream: Whether to use streaming response (not recommended)
-            callback: Optional callback for streaming responses
-        
-        Returns:
-            The generated response
+        Process a user query and generate a sommelier response with improved error handling
         """
         # Record start time for metrics
         start_time = time.time()
-        
-        # Select appropriate prompt based on query or specified type
-        prompt_id = self._select_prompt(query, prompt_type)
-        
-        # Select appropriate data source based on query
-        data_source_id = self._select_data_source(query)
-        
-        # Build conversation context
-        context = self._build_conversation_context()
-        
-        # Keep query short to stay under 512 byte limit
-        # Truncate user query if needed
-        max_query_length = 450  # Allow some buffer for the context
-        if len(query) > max_query_length:
-            query = query[:max_query_length] + "..."
-        
-        full_query = f"{context}\n\nUser: {query}"
-        
-        # Double-check that the final query is within limits
-        if len(full_query.encode('utf-8')) > 512:
-            # If still too long, use a minimal query
-            full_query = f"User: {query}"
+
+        try:
+            # Set conversation ID if provided
+            if conversation_id:
+                self.conversation_id = conversation_id
+                print(f"{Fore.CYAN}Continuing conversation with ID: {conversation_id}{Style.RESET_ALL}")
             
-        print(f"{Fore.YELLOW}Using prompt: {prompt_type or 'auto'}, data source: {data_source_id}{Style.RESET_ALL}")
-        
-        # For matching similar queries in the cache
-        query_essence = self._get_query_essence(query)
-        object_id = self._generate_stable_id(query_essence, data_source_id, prompt_id)
-        
-        if self.debug:
-            print(f"{Fore.CYAN}Query essence: {query_essence}{Style.RESET_ALL}")
-            print(f"{Fore.CYAN}Using object ID: {object_id}{Style.RESET_ALL}")
+            # For follow-up questions in a conversation, try to detect the correct prompt type
+            if self.conversation_id and not prompt_type:
+                # If this is a follow-up in a conversation, try to infer the prompt type from content
+                prompt_type = self._infer_prompt_type_from_query(query)
             
-        # Check for a matching previous response
-        previous_response = self.find_previous_response(query, data_source_id, prompt_id)
-        
-        # Track if this is a cache hit
-        is_cache_hit = previous_response is not None
-        
-        # If a previous response exists, use it
-        if previous_response:
-            print(f"{Fore.GREEN}Using cached response{Style.RESET_ALL}")
-            response_text = previous_response.get("response", "")
+            # Select appropriate prompt based on query or specified type
+            prompt_id = self._select_prompt(query, prompt_type)
             
-            # Update conversation ID if available
-            if "conversationID" in previous_response and not self.conversation_id:
-                self.conversation_id = previous_response.get("conversationID")
+            # Select appropriate data source based on query
+            data_source_id = self._select_data_source(query)
+            
+            # Build conversation context
+            context = self._build_conversation_context()
+            
+            # Keep query short to stay under 512 byte limit
+            # Truncate user query if needed
+            max_query_length = 450  # Allow some buffer for the context
+            if len(query) > max_query_length:
+                query = query[:max_query_length] + "..."
+            
+            full_query = f"{context}\n\nUser: {query}"
+            
+            # Double-check that the final query is within limits
+            if len(full_query.encode('utf-8')) > 512:
+                # If still too long, use a minimal query
+                full_query = f"User: {query}"
+                
+            print(f"{Fore.YELLOW}Using prompt: {prompt_type or 'auto'}, data source: {data_source_id}{Style.RESET_ALL}")
+            
+            # For matching similar queries in the cache
+            query_essence = self._get_query_essence(query)
+            object_id = self._generate_stable_id(query_essence, data_source_id, prompt_id)
+            
+            if self.debug:
+                print(f"{Fore.CYAN}Query essence: {query_essence}{Style.RESET_ALL}")
+                print(f"{Fore.CYAN}Using object ID: {object_id}{Style.RESET_ALL}")
+            
+            # Check for a matching previous response
+            previous_response = self.find_previous_response(query, data_source_id, prompt_id)
+            
+            # Track if this is a cache hit
+            is_cache_hit = previous_response is not None
+            
+            # If a previous response exists, use it
+            if previous_response:
+                print(f"{Fore.GREEN}Using cached response{Style.RESET_ALL}")
+                response_text = previous_response.get("response", "")
+                
+                # Update conversation ID if available
+                if "conversationID" in previous_response and not self.conversation_id:
+                    self.conversation_id = previous_response.get("conversationID")
+                
+                # Add to conversation history
+                self.conversation_history.append({
+                    "role": "user",
+                    "content": query
+                })
+                self.conversation_history.append({
+                    "role": "assistant",
+                    "content": response_text
+                })
+                
+                # Calculate response time for metrics
+                response_time = time.time() - start_time
+                
+                # Log in metrics
+                self.log_query(
+                    query=query,
+                    is_cache_hit=True,
+                    response_time=response_time,
+                    query_type=prompt_type or "auto",
+                    object_id=object_id
+                )
+                
+                return {
+                    "response": response_text,
+                    "conversationID": self.conversation_id
+                }
+            
+            # Always use non-streaming for reliability with stable object ID
+            print(f"{Fore.GREEN}Generating new response{Style.RESET_ALL}")
+            response_data = self.generate_response(
+                query=full_query,
+                data_source_id=data_source_id,
+                prompt_id=prompt_id,
+                object_id=object_id
+            )
+            
+            if not response_data:
+                # Log the error in metrics
+                self.log_error(
+                    error_type="No Response",
+                    details="Failed to generate response"
+                )
+                return {
+                    "response": "I'm sorry, I couldn't generate a response. Please try again.",
+                    "conversationID": self.conversation_id
+                }
+            
+            # Extract response text
+            response_text = response_data.get("response", "")
+            
+            # Store conversation ID if provided
+            if "conversationID" in response_data and response_data["conversationID"]:
+                self.conversation_id = response_data["conversationID"]
+                print(f"{Fore.CYAN}Conversation ID: {self.conversation_id}{Style.RESET_ALL}")
             
             # Add to conversation history
             self.conversation_history.append({
@@ -1156,109 +1489,51 @@ class SommelierAssistant:
             # Log in metrics
             self.log_query(
                 query=query,
-                is_cache_hit=True,
+                is_cache_hit=False,
                 response_time=response_time,
                 query_type=prompt_type or "auto",
                 object_id=object_id
             )
             
-            return response_text
-        
-        # Always use non-streaming for reliability with stable object ID
-        print(f"{Fore.GREEN}Generating new response{Style.RESET_ALL}")
-        response_data = self.generate_response(
-            query=full_query,
-            data_source_id=data_source_id,
-            prompt_id=prompt_id,
-            object_id=object_id
-        )
-        
-        if not response_data:
-            # Log the error in metrics
-            self.log_error(
-                error_type="No Response",
-                details="Failed to generate response"
-            )
-            return "I'm sorry, I couldn't generate a response. Please try again."
-        
-        # Extract response text
-        response_text = response_data.get("response", "")
-        
-        # Store conversation ID if provided
-        if "conversationID" in response_data and response_data["conversationID"]:
-            self.conversation_id = response_data["conversationID"]
-            print(f"{Fore.CYAN}Conversation ID: {self.conversation_id}{Style.RESET_ALL}")
-        
-        # Add to conversation history
-        self.conversation_history.append({
-            "role": "user",
-            "content": query
-        })
-        self.conversation_history.append({
-            "role": "assistant",
-            "content": response_text
-        })
-        
-        # Calculate response time for metrics
-        response_time = time.time() - start_time
-        
-        # Log in metrics
-        self.log_query(
-            query=query,
-            is_cache_hit=False,
-            response_time=response_time,
-            query_type=prompt_type or "auto",
-            object_id=object_id
-        )
-        
-        return response_text
-    
-    def _select_prompt(self, query, prompt_type=None):
-        """Select the appropriate prompt based on query content or specified type"""
-        # If a specific prompt type is requested, use it if available
-        if prompt_type and prompt_type in self.prompts:
-            return self.prompts[prompt_type]
-        
-        # If we have the semantic matcher, use it for intelligent matching
-        if hasattr(self, 'semantic_matcher') and self.semantic_matcher:
-            prompt_id = self.semantic_matcher.match_prompt(query)
-            if prompt_id in self.prompts:
-                return self.prompts[prompt_id]
-        
-        # Fall back to keyword matching if semantic matching isn't available or fails
-        query_lower = query.lower()
-        
-        # Check for recommendation patterns
-        if any(term in query_lower for term in ["recommend", "suggestion", "what wine should", "looking for a", "good wine"]):
-            if "recommendations" in self.prompts:
-                return self.prompts["recommendations"]
-        
-        # Check for food pairing patterns
-        if any(term in query_lower for term in ["pair with", "pairing", "goes with", "match with", "food"]):
-            if "food_pairing" in self.prompts:
-                return self.prompts["food_pairing"]
-        
-        # Check for education patterns
-        if any(term in query_lower for term in ["explain", "what is", "how does", "difference between", "learn"]):
-            if "education" in self.prompts:
-                return self.prompts["education"]
-        
-        # Check for vineyard/winery patterns
-        if any(term in query_lower for term in ["vineyard", "winery", "estate", "chateau", "domaine", "soil", "terroir"]):
-            if "vineyard_info" in self.prompts:
-                return self.prompts["vineyard_info"]
-        
-        # Check for tasting patterns
-        if any(term in query_lower for term in ["taste", "flavor", "aroma", "bouquet", "palate", "how to drink"]):
-            if "tasting" in self.prompts:
-                return self.prompts["tasting"]
-        
-        # Default to general sommelier prompt if available
-        if "sommelier" in self.prompts:
-            return self.prompts["sommelier"]
+            return {
+                "response": response_text,
+                "conversationID": self.conversation_id
+            }
             
-        # Fallback to first available prompt
-        return next(iter(self.prompts.values())) if self.prompts else None
+        except Exception as e:
+            # Log the error
+            error_message = str(e)
+            self.log_error(error_type="Query Processing Error", details=error_message)
+            print(f"{Fore.RED}Error processing query: {error_message}{Style.RESET_ALL}")
+            
+            # Calculate response time for metrics even for errors
+            response_time = time.time() - start_time
+            
+            # Return a more helpful error message based on the error type
+            if "filters:" in error_message:
+                # This is likely a filter parsing error (as in your logs)
+                response = "I'm having trouble understanding the context of your follow-up question. Could you please provide more details about what you're asking about specifically?"
+            elif "rate limit" in error_message.lower():
+                response = "I'm currently experiencing high demand. Please try again in a moment."
+            elif "timeout" in error_message.lower():
+                response = "It's taking longer than expected to process your request. Could you try asking in a simpler way?"
+            else:
+                # Generic error message for other issues
+                response = "I encountered an issue while processing your question. Could you try rephrasing or asking a new question?"
+            
+            # Log this as a miss in metrics
+            self.log_query(
+                query=query,
+                is_cache_hit=False,
+                response_time=response_time,
+                query_type=prompt_type or "auto",
+                object_id=None
+            )
+            
+            return {
+                "response": response,
+                "conversationID": self.conversation_id  # Return existing conversation ID even on error
+            }
     
     def _select_data_source(self, query):
         """Select the appropriate data source based on query content"""
@@ -1280,17 +1555,43 @@ class SommelierAssistant:
         return self.data_sources.get("all_wines")
     
     def _build_conversation_context(self):
-        """Build context from conversation history"""
+        """Build context from conversation history with improved context retention"""
         if not self.conversation_history:
             return "You are a knowledgeable sommelier AI assistant. This is the start of a new conversation."
         
         # For Algolia GenAI Toolkit, we need to keep the context very short due to the 512 byte limit
-        # Just use a brief reminder of the assistant's role
-        return "You are a knowledgeable sommelier AI assistant. Continue the conversation naturally."
+        # Include just the last exchange (last user question and assistant response)
+        # This provides crucial context for follow-up questions while staying under the limit
+        context = "You are a knowledgeable sommelier AI assistant. Continue the conversation naturally."
+        
+        # Get the most recent exchange (up to 2 messages)
+        recent_messages = self.conversation_history[-2:] if len(self.conversation_history) >= 2 else self.conversation_history
+        
+        # Add them to the context with role labels
+        for msg in recent_messages:
+            # Truncate very long messages to stay under byte limit
+            content = msg['content']
+            if len(content) > 100:  # Adjust this threshold as needed
+                content = content[:97] + "..."
+                
+            context += f"\n{msg['role'].capitalize()}: {content}"
+        
+        # Check if the context is too large
+        if len(context.encode('utf-8')) > 450:  # Leave some buffer below 512 byte limit
+            # If too large, just use a simpler context
+            return "You are a knowledgeable sommelier AI assistant. Continue the conversation naturally based on previous messages about wine."
+        
+        return context
     
     def generate_response(self, query, data_source_id, prompt_id, object_id=None):
-        """Generate a response using the GenAI Toolkit"""
+        """Generate a response using the GenAI Toolkit with improved conversation handling"""
         endpoint = f"{self.base_url}/generate/response"
+        
+        # Generate a conversation ID if we don't have one yet
+        if not self.conversation_id:
+            import uuid
+            self.conversation_id = f"conv-{str(uuid.uuid4())[:8]}"
+            print(f"{Fore.CYAN}Generated new conversation ID: {self.conversation_id}{Style.RESET_ALL}")
         
         # Extract query essence for caching and object ID
         query_essence = self._get_query_essence(query)
@@ -1310,8 +1611,9 @@ class SommelierAssistant:
             "dataSourceID": data_source_id,
             "promptID": prompt_id,
             "save": True,        # Always save responses for caching
-            "useCache": True,    # Always try to use cached responses
-            "objectID": object_id  # Use stable object ID for better caching
+            "useCache": False if self.conversation_id else True,  # Don't use cache in conversation mode
+            "objectID": object_id,  # Use stable object ID for better caching
+            "conversationID": self.conversation_id  # Always include our conversation ID
         }
         
         # Add attributes to retrieve if available
@@ -1319,7 +1621,7 @@ class SommelierAssistant:
             data["attributesToRetrieve"] = attributes_to_retrieve
             if self.debug:
                 print(f"{Fore.CYAN}Using attributesToRetrieve: {attributes_to_retrieve}{Style.RESET_ALL}")
-            
+                
         # Special handling for food pairing queries
         if self._is_food_pairing_query(query):
             # Extract food items
@@ -1331,15 +1633,12 @@ class SommelierAssistant:
                     print(f"{Fore.CYAN}Using food items as filter: {food_items}{Style.RESET_ALL}")
                 
                 # Add additional filters for food items
-                food_filter = " OR ".join([f"_tags:{item}" for item in food_items])
-                if "additionalFilters" in data:
-                    data["additionalFilters"] += f" AND ({food_filter})"
-                else:
-                    data["additionalFilters"] = food_filter
-        
-        # Add conversation ID if we have one for conversational context
-        if self.conversation_id:
-            data["conversationID"] = self.conversation_id
+                food_filter = " OR ".join([f"_tags:{item}" for item in food_items if item.strip()])
+                if food_filter:  # Only add the filter if it's not empty
+                    if "additionalFilters" in data:
+                        data["additionalFilters"] += f" AND ({food_filter})"
+                    else:
+                        data["additionalFilters"] = food_filter
         
         max_retries = 3
         retry_delay = 2  # seconds
@@ -1360,29 +1659,39 @@ class SommelierAssistant:
                 # Parse the response
                 response_data = response.json()
                 
-                # Store conversation ID for future requests
-                if "conversationID" in response_data and not self.conversation_id:
-                    self.conversation_id = response_data["conversationID"]
-                    print(f"{Fore.CYAN}Conversation ID: {self.conversation_id}{Style.RESET_ALL}")
+                # Always make sure the conversation ID is in the response data
+                # This ensures we maintain our own conversation ID regardless of what Algolia returns
+                response_data["conversationID"] = self.conversation_id
                 
                 # Verify response was stored by trying to retrieve it immediately
-                if not cached:
+                if not cached and not self.conversation_id:  # Skip verification for conversation mode
                     try:
                         time.sleep(1)  # Brief delay to allow indexing
                         verification = self.client.init_index("algolia_rag_responses").get_object(object_id)
                         print(f"{Fore.GREEN}Successfully verified response storage with ID: {object_id}{Style.RESET_ALL}")
                     except Exception as e:
                         print(f"{Fore.RED}Warning: Response may not have been stored: {e}{Style.RESET_ALL}")
-                        # Try to store it ourselves as a fallback
-                        try:
-                            if self.debug:
-                                print(f"{Fore.YELLOW}Attempting to manually store response...{Style.RESET_ALL}")
-                            index = self.client.init_index("algolia_rag_responses")
-                            response_data["objectID"] = object_id
-                            index.save_object(response_data)
-                            print(f"{Fore.GREEN}Manually stored response with ID: {object_id}{Style.RESET_ALL}")
-                        except Exception as manual_e:
-                            print(f"{Fore.RED}Failed manual storage: {manual_e}{Style.RESET_ALL}")
+                        # Don't try to manually store for conversation mode
+                
+                # After receiving the response - fix the prompt ID mismatch
+                if not cached and "response" in response_data:
+                    try:
+                        # Create a copy of the result with our original prompt ID
+                        corrected_object = {
+                            "objectID": object_id,  # Use our original stable ID
+                            "query": query,
+                            "response": response_data.get("response", ""),
+                            "dataSourceID": data_source_id,
+                            "promptID": prompt_id,  # Use our original prompt ID
+                            "conversationID": self.conversation_id,
+                            "createdAt": datetime.now().isoformat()
+                        }
+                        
+                        # Save the corrected object explicitly
+                        print(f"{Fore.CYAN}Saving corrected object with ID {object_id} and consistent prompt ID{Style.RESET_ALL}")
+                        self.client.init_index("algolia_rag_responses").save_object(corrected_object)
+                    except Exception as save_error:
+                        print(f"{Fore.RED}Error saving corrected response: {save_error}{Style.RESET_ALL}")
                 
                 return response_data
             except requests.exceptions.RequestException as e:
@@ -1401,7 +1710,11 @@ class SommelierAssistant:
                     print(f"Error generating response: {e}")
                     if hasattr(e, 'response') and hasattr(e.response, 'text'):
                         print(f"Response: {e.response.text}")
-                    return None
+                    # Return a basic response with our conversation ID
+                    return {
+                        "response": "I encountered an error while processing your request. Please try again.",
+                        "conversationID": self.conversation_id
+                    }
             except Exception as e:
                 # Log the error
                 self.log_error(
@@ -1415,14 +1728,21 @@ class SommelierAssistant:
                 continue
         
         print(f"Failed to generate response after {max_retries} attempts")
-        return None
+        # Even when all attempts fail, return a response with our conversation ID
+        return {
+            "response": "I apologize, but I couldn't generate a response after multiple attempts. Please try again later.",
+            "conversationID": self.conversation_id
+        }
         
     def _generate_stable_id(self, query_essence, data_source_id, prompt_id):
         """Generate a stable ID for caching similar queries"""
         import hashlib
+
+        # Include conversation ID in componenets if available
+        conv_component = f"|conv_{self.conversation_id}" if self.conversation_id else ""
         
         # Create a composite string from the key components
-        components = f"{query_essence}|{data_source_id}|{prompt_id}"
+        components = f"{query_essence}|{data_source_id}|{prompt_id}{conv_component}"
         
         # Generate a hash
         hash_object = hashlib.md5(components.encode())
@@ -1433,29 +1753,81 @@ class SommelierAssistant:
         
         if self.debug:
             print(f"{Fore.CYAN}Generated stable ID: {stable_id} for essence: {query_essence}{Style.RESET_ALL}")
-            print(f"{Fore.CYAN}Based on: query='{query_essence}', dataSource='{data_source_id}', prompt='{prompt_id}'{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}Based on: query='{query_essence}', dataSource='{data_source_id}', prompt='{prompt_id}', converation='{self.conversation_id}'{Style.RESET_ALL}")
         
         return stable_id
         
     def _get_query_essence(self, query):
-        """Extract the essence of a query for caching purposes"""
-        # Normalize
+        """Extract the essence of a query for caching purposes with improved specificity"""
+        # Normalize and clean the query
         normalized = query.lower().strip()
+        
+        # Store the exact query essence for highly precise cache hits
+        # Remove some very common words but keep most of the query intact for better exact matching
+        exact_words = normalized.split()
+        exact_stopwords = {"a", "an", "the", "is", "are", "that", "this", "with", "for", "to", "in", "of", "and", "or"}
+        exact_query = " ".join([word for word in exact_words if word not in exact_stopwords])
+        
+        # Hash the exact query if it's long (over 30 chars)
+        if len(exact_query) > 30:
+            import hashlib
+            exact_hash = hashlib.md5(exact_query.encode()).hexdigest()[:10]
+            exact_query = f"q_{exact_hash}"
         
         # Special handling for food pairing queries
         if self._is_food_pairing_query(normalized):
             food_items = self._extract_food_items(normalized)
             if food_items:
-                return f"pair_with_{' '.join(food_items)}"
+                # Include the exact query for higher precision
+                return f"exact_{exact_query}_pair_with_{' '.join(food_items)}"
         
-        # For other queries, extract key terms
+        # For recommendation queries
+        if any(term in normalized for term in ["recommend", "suggest", "looking for", "what wine"]):
+            # Extract specific constraints like price, color, region
+            wine_type = self._extract_wine_type(normalized)
+            price_range = self._extract_price_range(normalized)
+            region = self._extract_region(normalized)
+            
+            constraints = []
+            if wine_type:
+                constraints.append(wine_type)
+            if price_range:
+                constraints.append(price_range)
+            if region:
+                constraints.append(region)
+                
+            if constraints:
+                # Create a more specific essence for recommendation queries
+                return f"exact_{exact_query}_recommend_{' '.join(constraints)}"
+        
+        # For all other queries, use a combination of exact query and key terms
         key_terms = self._extract_key_terms(normalized)
-        return key_terms
+        
+        # Include the exact query hash at the start for higher precision
+        return f"exact_{exact_query}_{key_terms}"
         
     def _is_food_pairing_query(self, query):
-        """Check if this is a food pairing query"""
+        """Check if this is a food pairing query with improved validation"""
+        # Clean the query first
+        query = query.lower().strip()
+        
+        # Remove any conversation artifacts
+        suspicious_tokens = ["assistant:", "user:", "assistant", "user", "sommelier:"]
+        for token in suspicious_tokens:
+            if token in query:
+                query = query.replace(token, "")
+        
         pairing_terms = ["pair", "pairing", "goes with", "good with", "match", "matching", "complement"]
-        return any(term in query.lower() for term in pairing_terms)
+        
+        # Check if any pairing term is in the query
+        is_pairing = any(term in query for term in pairing_terms)
+        
+        # For follow-up questions, be more strict - require both a pairing term and a food term
+        if "that" in query or "this" in query:
+            food_related = any(term in query for term in ["food", "dish", "meal", "restaurant", "cuisine"])
+            return is_pairing and food_related
+        
+        return is_pairing
         
     def _determine_attributes(self, query):
         """Determine which attributes to retrieve based on query type"""
@@ -1479,6 +1851,127 @@ class SommelierAssistant:
             
         return attributes
     
+    def _extract_wine_type(self, query):
+        """Extract wine type from query"""
+        wine_types = {
+            "red": ["red", "cabernet", "merlot", "pinot noir", "syrah", "shiraz", "malbec", "zinfandel"],
+            "white": ["white", "chardonnay", "sauvignon blanc", "pinot grigio", "riesling", "moscato"],
+            "sparkling": ["sparkling", "champagne", "prosecco", "cava", "bubbly"],
+            "rose": ["rosé", "rose", "pink wine"]
+        }
+        
+        for wine_type, terms in wine_types.items():
+            if any(term in query for term in terms):
+                return wine_type
+        
+        return None
+    
+    def _infer_prompt_type_from_query(self, query):
+        """Infer the prompt type based on the query and conversation history"""
+        query_lower = query.lower()
+        
+        # If the conversation history is empty, return None for automatic detection
+        if not self.conversation_history:
+            return None
+        
+        # Look at the current query for clues
+        
+        # Check for food pairing indicators in follow-up questions
+        if any(term in query_lower for term in ["pair", "go with", "serve with", "dish", "meal", "food"]):
+            if "food_pairing" in self.prompts:
+                return "food_pairing"
+        
+        # Check for wine recommendation indicators in follow-up questions
+        if any(term in query_lower for term in ["recommend", "suggest", "alternative", "similar", "prefer"]):
+            if "recommendations" in self.prompts:
+                return "recommendations"
+                
+        # Check for tasting indicators in follow-up questions
+        if any(term in query_lower for term in ["taste", "flavor", "aroma", "smell", "drink", "palate"]):
+            if "tasting" in self.prompts:
+                return "tasting"
+        
+        # If we can't determine from current query, check previous assistant response
+        if len(self.conversation_history) >= 2:
+            last_assistant_msg = None
+            
+            # Find the last assistant message
+            for msg in reversed(self.conversation_history):
+                if msg["role"] == "assistant":
+                    last_assistant_msg = msg["content"].lower()
+                    break
+            
+            # If found, analyze it for context
+            if last_assistant_msg:
+                # Check if last response was about wine recommendations
+                if any(term in last_assistant_msg for term in ["recommend", "suggest", "try this", "excellent choice"]):
+                    if "recommendations" in self.prompts:
+                        return "recommendations"
+                
+                # Check if it was about food pairings
+                if any(term in last_assistant_msg for term in ["pair", "complement", "go well with", "match"]):
+                    if "food_pairing" in self.prompts:
+                        return "food_pairing"
+                        
+                # Check if it was about tasting notes
+                if any(term in last_assistant_msg for term in ["taste", "flavor", "palate", "aroma", "bouquet"]):
+                    if "tasting" in self.prompts:
+                        return "tasting"
+        
+        # Default to None (auto-select) if we can't determine
+        return None
+    
+    def _extract_price_range(self, query):
+        """Extract price range from query"""
+        import re
+        
+        # Look for dollar amounts like $20, $30-50, under $30
+        price_patterns = [
+            r'under\s+\$(\d+)',
+            r'less than\s+\$(\d+)',
+            r'around\s+\$(\d+)',
+            r'\$(\d+)-\$?(\d+)',
+            r'\$(\d+)',
+            r'(\d+)\s+dollars'
+        ]
+        
+        for pattern in price_patterns:
+            match = re.search(pattern, query)
+            if match:
+                if len(match.groups()) == 1:
+                    return f"price_{match.group(1)}"
+                elif len(match.groups()) == 2:
+                    return f"price_{match.group(1)}_to_{match.group(2)}"
+        
+        # Look for price descriptors
+        if "cheap" in query or "inexpensive" in query or "budget" in query:
+            return "price_budget"
+        elif "expensive" in query or "premium" in query or "luxury" in query:
+            return "price_premium"
+        
+        return None
+
+    def _extract_region(self, query):
+        """Extract wine region from query"""
+        # Common wine regions
+        regions = {
+            "france": ["french", "france", "bordeaux", "burgundy", "champagne", "rhone", "loire"],
+            "italy": ["italian", "italy", "tuscany", "piedmont", "veneto", "sicily"],
+            "spain": ["spanish", "spain", "rioja", "catalonia", "ribera"],
+            "usa": ["american", "california", "napa", "sonoma", "oregon", "washington"],
+            "australia": ["australian", "australia", "barossa", "margaret river"],
+            "new_zealand": ["new zealand", "marlborough"],
+            "argentina": ["argentinian", "argentina", "mendoza"],
+            "chile": ["chilean", "chile"],
+            "germany": ["german", "germany", "mosel", "rheingau"]
+        }
+        
+        for region, terms in regions.items():
+            if any(term in query.lower() for term in terms):
+                return region
+        
+        return None
+
     def clear_conversation(self):
         """Clear the conversation history"""
         self.conversation_history = []

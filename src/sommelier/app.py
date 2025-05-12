@@ -5,6 +5,7 @@ from flask_cors import CORS
 import json
 import os
 from datetime import datetime
+import time
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -48,12 +49,31 @@ def process_query():
     
     query = data.get('query', '')
     prompt_type = data.get('promptType')
+    conversation_id = data.get('conversationID') # Get conversationID if provided
+    print(f"Backend received conversation ID: {conversation_id}")
     
     if not query:
         return jsonify({"error": "Query is required"}), 400
     
+    # Start timing the request
+    start_time = time.time()
+    
     # Process the query (metrics tracking is now built in)
-    response = sommelier.process_query(query, prompt_type)
+    response_data = sommelier.process_query(query, prompt_type, conversation_id=conversation_id)
+
+    # Calculate actual response time
+    measured_response_time = time.time() - start_time
+
+    # Handle different return types (string or dictionary)
+    if isinstance(response_data, dict):
+        response_text = response_data.get("response", "")
+        conv_id = response_data.get("conversationID")
+        print(f"Backend sending conversation ID: {conv_id}")
+    else:
+        # If response is a string, use it directly
+        response_text = response_data
+        conv_id = sommelier.conversation_id
+        print(f"Backend sending conversation ID: {conv_id}")
     
     # Get prompt and data source IDs for checking cache hits 
     # (Used just to check if this was a cache hit, metrics tracking is already done)
@@ -69,20 +89,26 @@ def process_query():
     )
     
     # Get the response time from the most recent log entry
-    response_time = 0
+    # Default to the measured time instead of 0
+    response_time = measured_response_time
     if sommelier.current_session.get("query_log"):
         latest_entry = sommelier.current_session["query_log"][-1]
         if latest_entry.get("object_id") == object_id:
-            response_time = latest_entry.get("response_time", 0)
+            # Use the logged time if available, otherwise use our measured time
+            response_time = latest_entry.get("response_time", measured_response_time)
     
-    print(f"Sending response: cache_hit={is_cache_hit}, response_time={response_time}")
+    # Get the conversation ID from the assistant
+    current_conversation_id = sommelier.conversation_id
+    
+    print(f"Sending response: cache_hit={is_cache_hit}, response_time={response_time:.2f}, conversationID={current_conversation_id}")
     
     # Return the response along with cache info
     return jsonify({
-        "response": response,
-        "cache_hit": is_cache_hit,
+        "response": response_text,
+        "cache_hit": bool(is_cache_hit),
         "response_time": response_time,
-        "query_type": prompt_type or "auto"
+        "query_type": prompt_type or "auto",
+        "conversationID": current_conversation_id
     })
 
 @app.route('/api/metrics', methods=['GET'])
@@ -104,6 +130,15 @@ def get_metrics():
             "misses": stats["misses"],
             "hit_rate": hit_rate
         })
+
+    algolia_operations = session.get("algolia_operations", {
+        "total_operations": 0,
+        "search_operations": 0,
+        "get_operations": 0,
+        "save_operations": 0,
+        "update_operations": 0,
+        "delete_operations": 0
+    })
     
     # Sort by hit rate
     query_type_performance.sort(key=lambda x: x["hit_rate"], reverse=True)
@@ -125,7 +160,8 @@ def get_metrics():
         "actual_cost_with_caching": session.get("actual_cost_with_caching", 0),
         "cost_reduction_percentage": session.get("cost_reduction_percentage", 0),
         "query_type_performance": query_type_performance,
-        "recent_queries": session.get("query_log", [])[-10:] if session.get("query_log") else []
+        "recent_queries": session.get("query_log", [])[-10:] if session.get("query_log") else [],
+        "algolia_operations": algolia_operations
     })
 
 @app.route('/api/prompt-types', methods=['GET'])
